@@ -1,9 +1,17 @@
+#define DHT11_TYPE 1
+#define DHT12_TYPE 2
+#define DHTTYPE DHT12_TYPE
+
+#if DHTTYPE == DHT11_TYPE
 #include <DHT.h>
+#else
+#include <WEMOS_DHT12.h>
+#endif
 
 #include <ArduinoJson.h>
 #include <IRremoteESP8266.h>
 #include <IRsend.h>
-#include <ir_Daikin.h>
+#include <ir_Mitsubishi.h>
 
 #include <EEPROM.h>
 #include <ESP8266WiFi.h>
@@ -15,29 +23,28 @@
 #include <ESP8266mDNS.h>
 
 // EEPROM Storage Address Locations
-#define S_DAIKIN_MODE           200
-#define S_DAIKIN_FAN            210
-#define S_DAIKIN_TEMP           220
-#define S_DAIKIN_VS             230
-#define S_DAIKIN_HS             240
-#define S_DAIKIN_QM             250
-#define S_DAIKIN_PM             260
+#define S_MITSUBISHI_MODE           200
+#define S_MITSUBISHI_FAN            210
+#define S_MITSUBISHI_VANE           220
+#define S_MITSUBISHI_TEMP           230
 
 MDNSResponder mdns;
 ESP8266WebServer server(80);
 WebSocketsServer webSocket = WebSocketsServer(81);
 
-// NodeMCU
-IRDaikinESP dakinir(14);
-DHT dht(12, DHT22, 11);
-
 /* Wemos D1 Mini */
-// IRDaikinESP dakinir(5);
-// DHT dht(0, DHT11, 11);
+// 14 -> D5
+// 4 -> D2
+IRMitsubishiAC mitsubishi(14);
+#if DHTTYPE == DHT11_TYPE
+DHT dht(2, DHT11);
+#else
+DHT12 dht12;
+#endif
 
 // Replace with your network credentials
-const char* ssid = "xxxx";
-const char* password = "xxxx";
+const char* ssid = "MOVISTAR_5E61";
+const char* password = "MrMjjvkl4iEdKw5pGH5A";
 
 // Hostname
 const char* accessoryName = "daikin-thermostat";
@@ -50,11 +57,8 @@ class AC {
     float currentHumidity;
     String targetMode;
     String targetFanSpeed;
+    String targetVane;
     int targetTemperature;
-    bool verticalSwing;
-    bool horizontalSwing;
-    bool quietMode;
-    bool powerfulMode;
 
     // Saves the settings to EEPROM
     void save() {
@@ -67,19 +71,13 @@ class AC {
 
     // Restores Settings from EEPROM
     void restore() {
-      targetMode = load(S_DAIKIN_MODE);
-      targetFanSpeed = load(S_DAIKIN_FAN);
-      verticalSwing = (load(S_DAIKIN_VS) == "1") ? true : false;
-      horizontalSwing = (load(S_DAIKIN_HS) == "1") ? true : false;
-      quietMode = (load(S_DAIKIN_QM) == "1") ? true : false;
-      powerfulMode = (load(S_DAIKIN_PM) == "1") ? true : false;
+      targetMode = load(S_MITSUBISHI_MODE);
+      targetFanSpeed = load(S_MITSUBISHI_FAN);
+      targetVane = load(S_MITSUBISHI_VANE);
 
       setTargetMode(targetMode);
       setTargetFanSpeed(targetFanSpeed);
-      setVerticalSwing(verticalSwing);
-      setHorizontalSwing(horizontalSwing);
-      setQuietMode(quietMode);
-      setPowerfulMode(powerfulMode);
+      setTargetVane(targetVane);
     }
 
     void handler(String payload) {
@@ -89,6 +87,14 @@ class AC {
       /* Get and Set Target State */
       if (req.containsKey("targetMode")) {
         setTargetMode(req["targetMode"]);
+      }
+
+      if (req.containsKey("targetModeOn")) {
+        if (req["targetModeOn"]) {
+          setTargetMode("cool");
+        } else {
+          setTargetMode("off");
+        }
       }
 
       /* Get and Set Fan Speed */
@@ -101,25 +107,13 @@ class AC {
         setTemperature(req["targetTemperature"]);
       }
 
-      /* Other Settings */
-      if (req.containsKey("verticalSwing")) {
-        setVerticalSwing(req["verticalSwing"]);
-      }
-
-      if (req.containsKey("horizontalSwing")) {
-        setHorizontalSwing(req["horizontalSwing"]);
-      }
-
-      if (req.containsKey("quiet")) {
-        setQuietMode(req["quietMode"]);
-      }
-
-      if (req.containsKey("powerful")) {
-        setPowerfulMode(req["powerfulMode"]);
+      /* Get and Set Target Vane */
+      if (req.containsKey("targetVane")) {
+        setTargetVane(req["targetVane"]);
       }
 
       // send the IR signal.
-      dakinir.send();
+      mitsubishi.send();
 
       // broadcast update
       broadcast();
@@ -132,30 +126,21 @@ class AC {
       value.toLowerCase();
 
       if (value == "off") {
-        dakinir.off();
-
+         mitsubishi.off();
       } else if (value == "cool") {
-        dakinir.on();
-        dakinir.setMode(DAIKIN_COOL);
-
+        mitsubishi.on();
+        mitsubishi.setMode(MITSUBISHI_AC_COOL);
       } else if (value == "heat") {
-        dakinir.on();
-        dakinir.setMode(DAIKIN_HEAT);
-
-      } else if (value == "fan") {
-        dakinir.on();
-        dakinir.setMode(DAIKIN_FAN);
-
+        mitsubishi.on();
+        mitsubishi.setMode(MITSUBISHI_AC_HEAT);
       } else if (value == "auto") {
-        dakinir.on();
-        dakinir.setMode(DAIKIN_AUTO);
-
+        mitsubishi.on();
+        mitsubishi.setMode(MITSUBISHI_AC_AUTO);
       } else if (value == "dry") {
-        dakinir.on();
-        dakinir.setMode(DAIKIN_DRY);
-
+        mitsubishi.on();
+        mitsubishi.setMode(MITSUBISHI_AC_DRY);
       } else {
-        dakinir.off();
+        mitsubishi.off();
         value = "off";
         Serial.println("WARNING: No Valid Mode Passed. Turning Off.");
       }
@@ -164,81 +149,73 @@ class AC {
         Serial.print("Target Mode Changed: ");
         Serial.println(value);
         targetMode = value;
-        set(S_DAIKIN_MODE, targetMode);
+        set(S_MITSUBISHI_MODE, targetMode);
       }
     }
 
     void setTargetFanSpeed(String value) {
       value.toLowerCase();
-
-      if (value == "auto") {
-        dakinir.setFan(DAIKIN_FAN_AUTO);
-
-      } else if (value == "min") {
-        dakinir.setFan(DAIKIN_FAN_MIN);
-
-      } else if (value == "max") {
-        dakinir.setFan(DAIKIN_FAN_MAX);
-
-      } else {
-        dakinir.setFan(DAIKIN_FAN_MAX);
-        value = "auto";
-        Serial.println("WARNING: No Valid Fan Speed Passed. Setting to Auto.");
-      }
+     if (value == "auto") {
+       mitsubishi.setFan(MITSUBISHI_AC_FAN_AUTO);
+     } else if (value == "low") {
+       mitsubishi.setFan(1U);
+     } else if (value == "medium") {
+       mitsubishi.setFan(2U);
+     } else if (value == "high") {
+       mitsubishi.setFan(3U);
+     } else if (value == "superhigh") {
+       mitsubishi.setFan(4U);
+     } else {
+       mitsubishi.setFan(4U);
+       value = "auto";
+       Serial.println("WARNING: No Valid Fan Speed Passed. Setting to Auto.");
+     }
 
       if (value != targetFanSpeed) {
         Serial.print("Target Fan Speed: ");
         Serial.println(value);
         targetFanSpeed = value;
-        set(S_DAIKIN_FAN, targetFanSpeed);
+        set(S_MITSUBISHI_FAN, targetFanSpeed);
+      }
+    }
+
+    void setTargetVane(String value) {
+      value.toLowerCase();
+     if (value == "auto") {
+       mitsubishi.setVane(MITSUBISHI_AC_VANE_AUTO);
+     } else if (value == "automove") {
+       mitsubishi.setVane(MITSUBISHI_AC_VANE_AUTO_MOVE);
+      } else if (value == "1") {
+       mitsubishi.setVane(1U);
+            } else if (value == "2") {
+       mitsubishi.setVane(2U);
+            } else if (value == "3") {
+       mitsubishi.setVane(3U);
+            } else if (value == "4") {
+       mitsubishi.setVane(4U);
+            } else if (value == "5") {
+       mitsubishi.setVane(5U);
+            } else if (value == "6") {
+       mitsubishi.setVane(6U);
+     } else {
+       mitsubishi.setVane(MITSUBISHI_AC_VANE_AUTO);
+       value = "auto";
+       Serial.println("WARNING: No Valid Vane Passed. Setting to Auto.");
+     }
+
+      if (value != targetVane) {
+        Serial.print("Target Vane: ");
+        Serial.println(value);
+        targetVane = value;
+        set(S_MITSUBISHI_VANE, targetVane);
       }
     }
 
     void setTemperature(int value) {
       Serial.print("Target Temperature: ");
       Serial.println(value);
-      dakinir.setTemp(value);
+      mitsubishi.setTemp(value);
       targetTemperature = value;
-    }
-
-    void setVerticalSwing(bool value) {
-      dakinir.setSwingVertical(value);
-      if (value != verticalSwing) {
-        Serial.print("Verticle Swing: ");
-        Serial.println(value);
-        verticalSwing = value;
-        set(S_DAIKIN_VS, String(verticalSwing));
-      }
-    }
-
-    void setHorizontalSwing(bool value) {
-      dakinir.setSwingHorizontal(value);
-      if (value != horizontalSwing) {
-        Serial.print("Horizontal Swing: ");
-        Serial.println(value);
-        horizontalSwing = value;
-        set(S_DAIKIN_HS, String(horizontalSwing));
-      }
-    }
-
-    void setQuietMode(bool value) {
-      dakinir.setQuiet(value);
-      if (value != quietMode) {
-        Serial.print("Quiet Mode: ");
-        Serial.println(value);
-        quietMode = value;
-        set(S_DAIKIN_QM, String(quietMode));
-      }
-    }
-
-    void setPowerfulMode(bool value) {
-      dakinir.setPowerful(value);
-      if (value != powerfulMode) {
-        Serial.print("Powerful Mode: ");
-        Serial.println(value);
-        powerfulMode = value;
-        set(S_DAIKIN_PM, String(powerfulMode));
-      }
     }
 
     float getCurrentTemperature() {
@@ -260,11 +237,7 @@ class AC {
       root["targetMode"] = targetMode;
       root["targetFanSpeed"] = targetFanSpeed;
       root["targetTemperature"] = targetTemperature;
-      root["verticalSwing"] = verticalSwing;
-      root["horizontalSwing"] = horizontalSwing;
-      root["quietMode"] = quietMode;
-      root["powerfulMode"] = powerfulMode;
-
+      root["targetVane"] = targetVane;
       String res;
       root.printTo(res);
 
@@ -318,9 +291,18 @@ class AC {
 
       if (currentMillis - dhtLastRead >= 5000) {
         dhtLastRead = currentMillis;
-
+#if DHTTYPE == DHT11_TYPE
         humidity = dht.readHumidity();
         temp = dht.readTemperature(false);
+#else
+        if(dht12.get()==0){
+          humidity = dht12.humidity;
+          temp = dht12.cTemp;
+        } else {
+          Serial.println("Failed to read from DHT sensor!");
+          return;
+        }
+#endif
 
         if (isnan(humidity) || isnan(temp)) {
           Serial.println("Failed to read from DHT sensor!");
@@ -371,7 +353,7 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
 }
 
 void setup(void) {
-  delay(1000);
+//  delay(1000);
 
   Serial.begin(115200, SERIAL_8N1, SERIAL_TX_ONLY);
 
@@ -401,12 +383,10 @@ void setup(void) {
   ac.currentTemperature = 0;
   ac.currentHumidity = 0;
   ac.targetMode = "off";
-  ac.targetFanSpeed = "auto";
-  ac.targetTemperature = 23;
-  ac.verticalSwing = true;
-  ac.horizontalSwing = true;
-  ac.quietMode = false;
-  ac.powerfulMode = false;
+  ac.targetFanSpeed = "low";
+  ac.targetTemperature = 24;
+  ac.targetVane = "1";
+  
 
   server.on("/daikin", HTTP_OPTIONS, []() {
     sendCors();
@@ -445,11 +425,13 @@ void setup(void) {
   webSocket.onEvent(webSocketEvent);
   Serial.println("WebSocket Server Started");
 
-  dakinir.begin();
+  mitsubishi.begin();
   Serial.println("IR Send Ready");
 
+  #if DHTTYPE == DHT11_TYPE
   dht.begin();
   Serial.println("DHT Ready");
+  #endif
 
   // Add service to mdns-sd
   mdns.addService("oznu-platform", "tcp", 81);

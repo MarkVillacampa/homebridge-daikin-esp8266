@@ -151,7 +151,7 @@ class ThermostatPlatformAccessory {
     off: Characteristic.CurrentHeatingCoolingState.OFF
   };
 
-  switches = ['Vertical Swing', 'Horizontal Swing', 'Quiet Mode', 'Powerful Mode'];
+  switches = ['Target Mode On'];
 
   constructor(log, accessory, config) {
     this.accessory = accessory;
